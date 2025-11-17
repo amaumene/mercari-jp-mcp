@@ -97,5 +97,8 @@ def search_mercari_items_filtered(
 
 if __name__ == "__main__":
     # For remote MCP server, use SSE transport
-    # FastMCP.run() handles the ASGI app creation internally
-    mercari_mcp.run(transport="sse", host="0.0.0.0", port=8000)
+    import uvicorn
+    mercari_mcp.run(transport="sse")
+
+    # Alternative: Run with uvicorn directly
+    # uvicorn.run(mercari_mcp.get_asgi_app(), host="0.0.0.0", port=8000)
