@@ -1,38 +1,63 @@
-from typing import Any, Dict, List, Optional
+import logging
+import os
+from typing import Any, Dict, List, Optional, Protocol, Generator
 from mercari import (MercariOrder, MercariSearchStatus, MercariSort, search)
 from pydantic import Field
 from fastmcp import FastMCP
 
+# Initialize logger
+logger = logging.getLogger(__name__)
+
+# Configure logging format
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+# Protocol for Item structure from mercari library
+class Item(Protocol):
+    """Protocol defining the structure of Item objects from mercari.search()"""
+    productName: str
+    price: str | int | float
+    productURL: str
+    id: str
+
+
 mcp = FastMCP(name="MercariSearchComplete")
 
-@mcp.tool(name="search_mercari_jp", 
+@mcp.tool(name="search_mercari_jp",
                 description="""Search Mercari for items, excluding keywords and filtering by price and specific model name.
                 Args:
                     keyword (str): The main keyword to search for (e.g., 'iPhone15 Pro 256GB'). Optimize this to ensure the product name is correct, sometimes it has to be in Japanese.
                     exclude_keywords (str): Space-separated keywords to exclude. Think about exclude keywords that can make the search more precise. Generate this in japanese. For example, 'ジャンク', 'max', 'plus', '11', '12', '13', '14', '16', 'ケース', 'カバー', 'フィルム' when searching for iPhone15 Pro 256GB. Don't forget to separate them with space. Do not include '新品', '未使用', or '中古' in this list if not requested.
                     min_price (int, optional): Minimum price in JPY. Think about the minimum price that you are willing to pay for the item. For example, if you are looking for a new iPhone15 Pro 256GB, you might want to set a minimum price of 100000 JPY.
-                    max_price (int, optional): Maximum price in JPY. Think about the maximum price that you are willing to pay for the item. For example, if you are looking for a new iPhone15 Pro 256GB, you might want to set a maximum price of 200000 JPY.
-                    limit (int): Maximum number of items to return.""")
+                    max_price (int, optional): Maximum price in JPY. Think about the maximum price that you are willing to pay for the item. For example, if you are looking for a new iPhone15 Pro 256GB, you might want to set a maximum price of 200000 JPY.""")
 def search_mercari_items_filtered(
     keyword: str = Field(..., description="The main keyword to search for (e.g., 'iPhone15 Pro 256GB')."),
     exclude_keywords: str = Field("", description="Space-separated keywords to exclude (e.g., 'ジャンク max')."),
     min_price: Optional[int] = Field(None, description="Minimum price in JPY.", ge=0),
-    max_price: Optional[int] = Field(None, description="Maximum price in JPY.", ge=0),
-    limit: int = Field(20, description="Maximum number of items to return.", ge=1)
+    max_price: Optional[int] = Field(None, description="Maximum price in JPY.", ge=0)
 ) -> List[Dict[str, Any]]:
     """
     Performs a search on Mercari Japan using a keyword, excluding specified keywords,
     and filtering results by the provided price range.
-    Additionally filters results based on keywords derived from the input keyword
-    and exclude_keywords to ensure the product name closely matches the desired model.
     Uses default sorting (price ascending) and only shows items on sale.
 
     Returns:
-        A list of dictionaries for items matching all criteria, limited to the specified number.
+        A list of dictionaries for items matching all criteria.
         Returns an empty list if no items are found or an error occurs.
     """
+    # Input validation
+    if not keyword or not keyword.strip():
+        logger.error("Keyword parameter is empty or contains only whitespace")
+        return []
+
+    if min_price is not None and max_price is not None and min_price > max_price:
+        logger.error(f"Invalid price range: min_price ({min_price}) is greater than max_price ({max_price})")
+        return []
+
     try:
-        search_results = search(
+        search_results: Generator[Item, None, None] = search(
             keyword,
             sort=MercariSort.SORT_SCORE,
             order=MercariOrder.ORDER_DESC,
@@ -41,64 +66,52 @@ def search_mercari_items_filtered(
         )
 
         items_found: List[Dict[str, Any]] = []
-        required_terms = [term.lower() for term in keyword.split()]
-        unwanted_terms_from_input = [term.lower() for term in exclude_keywords.split()]
-        all_unwanted_terms = list(set(unwanted_terms_from_input))
-        all_unwanted_terms = [term for term in all_unwanted_terms if term not in required_terms]
-
 
         for item in search_results:
             try:
-                product_name = getattr(item, 'productName', None)
+                product_name: Optional[str] = getattr(item, 'productName', None)
                 if product_name is None:
                     continue
 
-                price = getattr(item, 'price', None)
-                if price is None:
+                price_raw: Optional[str | int | float] = getattr(item, 'price', None)
+                if price_raw is None:
                     continue
+
                 try:
-                    price = float(price)
+                    price: float = float(price_raw)
                 except (ValueError, TypeError):
                     continue
 
-                lower_product_name = product_name.lower()
-                name_contains_desired_keywords = all(
-                    term in lower_product_name for term in required_terms
-                )
-                name_contains_unwanted_terms = any(
-                    term in lower_product_name for term in all_unwanted_terms
-                )
+                # Price filtering
+                min_check_passed: bool = (min_price is None) or (price >= min_price)
+                max_check_passed: bool = (max_price is None) or (price <= max_price)
 
-                if name_contains_desired_keywords and not name_contains_unwanted_terms:
-                    min_check_passed = (min_price is None) or (price >= min_price)
-                    max_check_passed = (max_price is None) or (price <= max_price)
+                if min_check_passed and max_check_passed:
+                    items_found.append({
+                        "name": product_name,
+                        "url": getattr(item, 'productURL', 'N/A'),
+                        "price": price,
+                    })
 
-                    if min_check_passed and max_check_passed:
-                        items_found.append({
-                            "name": product_name,
-                            "url": getattr(item, 'productURL', 'N/A'),
-                            "price": price,
-                        })
-
-                        if len(items_found) >= limit:
-                            break
-
-            except (AttributeError) as filter_err:
-                print(f"Warning: Skipping item during post-filtering due to data access error: {filter_err}")
+            except AttributeError as filter_err:
+                logger.warning(f"Skipping item during post-filtering due to data access error: {filter_err}")
                 continue
             except Exception as unexpected_err:
-                print(f"Warning: Skipping item due to unexpected error during filtering: {unexpected_err}")
+                logger.error(f"Skipping item due to unexpected error during filtering: {unexpected_err}")
                 continue
+
         return items_found
 
     except Exception as e:
-        print(f"Error: An error occurred during Mercari search: {e}")
-        raise e
+        logger.error(f"An error occurred during Mercari search: {e}")
+        return []
 
 if __name__ == "__main__":
     # For remote MCP server, use SSE transport
     import uvicorn
-    mcp.run(transport="http", host="0.0.0.0", port=8000)
+    host: str = os.getenv("MCP_HOST", "0.0.0.0")
+    port: int = int(os.getenv("MCP_PORT", "8000"))
+    mcp.run(transport="http", host=host, port=port)
 
     # Alternative: Run with uvicorn directly
-    # uvicorn.run(mcp.get_asgi_app(), host="0.0.0.0", port=8000)
+    # uvicorn.run(mcp.get_asgi_app(), host=host, port=port)
