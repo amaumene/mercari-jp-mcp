@@ -1,9 +1,14 @@
 {
-  "name": "mercari-jp-mcp",
-  "version": "0.1.0",
-  "description": "A FastMCP server to search Mercari Japan",
-  "source": "server.py",
-  "transport": "sse",
-  "host": "0.0.0.0",
-  "port": 8000
+  "$schema": "https://gofastmcp.com/public/schemas/fastmcp.json/v1.json",
+  "source": {
+    "type": "filesystem",
+    "path": "server.py",
+    "entrypoint": "mcp"
+  },
+  "deployment": {
+    "transport": "http",
+    "host": "0.0.0.0",
+    "port": 8000,
+    "log_level": "INFO"
+  }
 }
