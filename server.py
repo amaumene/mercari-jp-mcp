@@ -3,9 +3,9 @@ from mercari import (MercariOrder, MercariSearchStatus, MercariSort, search)
 from pydantic import Field
 from fastmcp import FastMCP
 
-mercari_mcp = FastMCP(name="MercariSearchComplete", dependencies=["mercari"])
+mcp = FastMCP(name="MercariSearchComplete")
 
-@mercari_mcp.tool(name="search_mercari_jp", 
+@mcp.tool(name="search_mercari_jp", 
                 description="""Search Mercari for items, excluding keywords and filtering by price and specific model name.
                 Args:
                     keyword (str): The main keyword to search for (e.g., 'iPhone15 Pro 256GB'). Optimize this to ensure the product name is correct, sometimes it has to be in Japanese.
@@ -98,7 +98,7 @@ def search_mercari_items_filtered(
 if __name__ == "__main__":
     # For remote MCP server, use SSE transport
     import uvicorn
-    mercari_mcp.run(transport="sse")
+    mcp.run(transport="sse")
 
     # Alternative: Run with uvicorn directly
-    # uvicorn.run(mercari_mcp.get_asgi_app(), host="0.0.0.0", port=8000)
+    # uvicorn.run(mcp.get_asgi_app(), host="0.0.0.0", port=8000)

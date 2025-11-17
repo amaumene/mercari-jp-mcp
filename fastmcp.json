@@ -2,30 +2,8 @@
   "name": "mercari-jp-mcp",
   "version": "0.1.0",
   "description": "A FastMCP server to search Mercari Japan",
-  "server": {
-    "module": "server",
-    "instance": "mercari_mcp"
-  },
+  "source": "server.py",
   "transport": "sse",
   "host": "0.0.0.0",
-  "port": 8000,
-  "python": {
-    "requirements": [
-      "fastmcp",
-      "pydantic",
-      "asn1",
-      "autopep8",
-      "certifi",
-      "cffi",
-      "charset-normalizer",
-      "cryptography",
-      "enum-compat",
-      "idna",
-      "pycodestyle",
-      "pycparser",
-      "requests",
-      "toml",
-      "urllib3"
-    ]
-  }
+  "port": 8000
 }
