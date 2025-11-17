@@ -8,8 +8,21 @@ license = "MIT"
 
 dependencies = [
     "fastmcp>=2.0.0,<=2.10.6",
-    "mercari>=2.2.1",
     "pydantic>=2.7.0,<2.12.0",
+    # mercari dependencies - using latest versions
+    "asn1",
+    "autopep8",
+    "certifi",
+    "cffi",
+    "charset-normalizer",
+    "cryptography",
+    "enum-compat",
+    "idna",
+    "pycodestyle",
+    "pycparser",
+    "requests",
+    "toml",
+    "urllib3",
 ]
 
 [tool.setuptools]
