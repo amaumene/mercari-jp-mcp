@@ -7,24 +7,12 @@ readme = "README.md"
 license = "MIT"
 
 dependencies = [
-#    "fastmcp>=2.0.0,<=2.10.6",
-#    "pydantic>=2.7.0,<2.12.0",
     "fastmcp",
     "pydantic",
-    # mercari dependencies - using latest versions
-    "asn1",
-    "autopep8",
-    "certifi",
-    "cffi",
-    "charset-normalizer",
+    # Dependencies for custom mercari library
+    "asn1crypto",
     "cryptography",
-    "enum-compat",
-    "idna",
-    "pycodestyle",
-    "pycparser",
     "requests",
-    "toml",
-    "urllib3",
 ]
 
 [tool.setuptools]

@@ -1,8 +1,13 @@
 import uuid
 import json
+import logging
 import requests
-from .MercariItemFull import Item as MercariItemFull, ItemAuction
+from urllib.parse import urlencode
+from .MercariItemPydantic import Item as MercariItemFull, ItemAuction
 from .DpopUtils import generate_DPOP
+
+# Set up logger for validation errors
+logger = logging.getLogger(__name__)
 
 rootURL = "https://api.mercari.jp/"
 rootProductURL = "https://jp.mercari.com/item/"
@@ -85,16 +90,67 @@ def parse(resp):
 
 # used for the itemInfo endpoint
 def parseItemInfo(resp):
-    return MercariItemFull(
-        **resp['data']
-    )
+    """Parse item info using Pydantic for automatic validation."""
+    from pydantic import ValidationError
+
+    try:
+        # Handle nested auction_info field if present
+        data = resp['data'].copy()
+        if 'auction_info' in data and data['auction_info'] is not None:
+            data['auction'] = data.pop('auction_info')
+
+        return MercariItemFull(**data)
+    except ValidationError as e:
+        # Extract field names from validation errors for better diagnostics
+        error_fields = []
+        for error in e.errors():
+            # error['loc'] is a tuple like ('comments', 0) for comments.0
+            field_path = '.'.join(str(x) for x in error['loc'])
+            error_type = error['type']
+            error_fields.append(f"{field_path} ({error_type})")
+
+        # Log validation errors with field names
+        logger.error(f"Failed to parse item info: {len(e.errors())} validation error(s)")
+        logger.error(f"  Failed fields: {', '.join(error_fields)}")
+
+        # Log specific field structures that commonly cause issues
+        if 'comments' in resp['data']:
+            comments = resp['data']['comments']
+            logger.debug(f"Comments field type: {type(comments)}, length: {len(comments) if isinstance(comments, list) else 'N/A'}")
+            if isinstance(comments, list) and len(comments) > 0:
+                logger.debug(f"First comment structure: {type(comments[0])} - {comments[0]}")
+
+        # Log auction field if that's causing issues
+        if 'auction_info' in resp['data'] or 'auction' in resp['data']:
+            auction_data = resp['data'].get('auction_info') or resp['data'].get('auction')
+            if auction_data:
+                logger.debug(f"Auction data: {auction_data}")
+
+        # Only log full raw data in debug mode to avoid spam
+        logger.debug(f"Full raw data keys: {resp['data'].keys()}")
+        raise
+    except KeyError as e:
+        logger.error(f"Missing required field in response: {e}")
+        logger.debug(f"Response structure: {resp.keys()}")
+        raise
 
 def fetch(url, data, parser, method="POST"):
+    # For GET requests, construct the full URL with query parameters
+    # This is critical for DPOP authentication to work correctly
+    if method == "GET":
+        # Convert data to query string and append to URL
+        query_params = convert_booleans(data)
+        query_string = urlencode(query_params)
+        dpop_url = f"{url}?{query_string}"
+    else:
+        dpop_url = url
+
+    # Generate DPOP token with the complete URL (including query params for GET)
+    # Use random UUID instead of hardcoded string to avoid tracking
     DPOP = generate_DPOP(
-        # let's see if this gets blacklisted, but it also lets them track
-        uuid="Mercari Python Bot",
+        uuid=str(uuid.uuid4()),
         method=method,
-        url=url,
+        url=dpop_url,
     )
 
     headers = {
@@ -103,18 +159,27 @@ def fetch(url, data, parser, method="POST"):
         'Accept': '*/*',
         'Accept-Encoding': 'deflate, gzip',
         'Content-Type': 'application/json; charset=utf-8',
-        # courtesy header since they're blocking python-requests (returns 0 results)
-        'User-Agent': 'python-mercari',
+        # Use realistic browser User-Agent to avoid bot detection
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
-    
+
     serializedData = json.dumps(data, ensure_ascii=False).encode('utf-8')
 
-    if method == "POST":
-        r = requests.post(url, headers=headers, data=serializedData)
-    else:
-        r = requests.get(url, headers=headers, params=convert_booleans(data))    
+    try:
+        if method == "POST":
+            r = requests.post(url, headers=headers, data=serializedData)
+        else:
+            r = requests.get(url, headers=headers, params=convert_booleans(data))
 
-    r.raise_for_status()
+        r.raise_for_status()
+
+    except requests.exceptions.HTTPError as e:
+        # Log authentication errors specifically
+        if r.status_code == 401:
+            logger.warning(f"Authentication failed (401) for URL: {dpop_url}")
+            logger.debug(f"Request headers (DPOP omitted): X-Platform={headers['X-Platform']}, User-Agent={headers['User-Agent']}")
+            logger.debug(f"Response: {r.text[:200] if r.text else 'empty'}")
+        raise
 
     return parser(r.json())
 
@@ -122,30 +187,132 @@ def fetch(url, data, parser, method="POST"):
 def pageToPageToken(page):
     return "v1:{}".format(page)
 
+# Single-page search function for pagination control
+def search_page(
+    keywords,
+    sort=MercariSort.SORT_CREATED_TIME,
+    order=MercariOrder.ORDER_DESC,
+    status=MercariSearchStatus.ON_SALE,
+    exclude_keywords="",
+    category_ids=None,
+    brand_ids=None,
+    page_token=None,
+    page_limit=120
+):
+    """
+    Search for a single page of results.
+
+    Args:
+        keywords (str): Search keywords
+        sort (str): Sort method (use MercariSort constants)
+        order (str): Sort order (use MercariOrder constants)
+        status (str): Item status filter (use MercariSearchStatus constants)
+        exclude_keywords (str): Keywords to exclude from results
+        category_ids (list, optional): List of category IDs to filter by
+        brand_ids (list, optional): List of brand IDs to filter by
+        page_token (str, optional): Token for pagination (None for first page)
+        page_limit (int): Items per page (1-120, default 120)
+
+    Returns:
+        tuple: (items, next_page_token) where next_page_token is None if no more pages
+    """
+    # Clamp page limit between 1 and 120
+    limit = max(1, min(120, page_limit))
+
+    # Build search condition
+    search_condition = {
+        "keyword": keywords,
+        "sort": sort,
+        "order": order,
+        "status": [status],
+        "excludeKeyword": exclude_keywords,
+    }
+
+    # Add category filtering if provided
+    if category_ids is not None and len(category_ids) > 0:
+        search_condition["categoryIds"] = category_ids
+
+    # Add brand filtering if provided
+    if brand_ids is not None and len(brand_ids) > 0:
+        search_condition["brandIds"] = brand_ids
+
+    data = {
+        "userId": "MERCARI_BOT_{}".format(uuid.uuid4()),
+        "pageSize": limit,
+        "pageToken": page_token or pageToPageToken(0),
+        "searchSessionId": "MERCARI_BOT_{}".format(uuid.uuid4()),
+        "indexRouting": "INDEX_ROUTING_UNSPECIFIED",
+        "searchCondition": search_condition,
+        "withAuction": True,
+        "defaultDatasets": [
+            "DATASET_TYPE_MERCARI",
+            "DATASET_TYPE_BEYOND"
+        ]
+    }
+
+    items, has_next, next_token = fetch(searchURL, data, parse)
+    return items, next_token if has_next else None
+
+
 # returns an generator for Item objects
 # keeps searching until no results so may take a while to get results back
 
-def search(keywords, sort=MercariSort.SORT_CREATED_TIME, order=MercariOrder.ORDER_DESC, status=MercariSearchStatus.ON_SALE, exclude_keywords=""):
+def search(
+    keywords,
+    sort=MercariSort.SORT_CREATED_TIME,
+    order=MercariOrder.ORDER_DESC,
+    status=MercariSearchStatus.ON_SALE,
+    exclude_keywords="",
+    category_ids=None,
+    brand_ids=None,
+    page_limit=120
+):
+    """
+    Search Mercari for items matching the given criteria.
 
-    # This is per page and not for the final result
-    limit = 120
+    Args:
+        keywords (str): Search keywords
+        sort (str): Sort method (use MercariSort constants)
+        order (str): Sort order (use MercariOrder constants)
+        status (str): Item status filter (use MercariSearchStatus constants)
+        exclude_keywords (str): Keywords to exclude from results
+        category_ids (list, optional): List of category IDs to filter by
+        brand_ids (list, optional): List of brand IDs to filter by
+        page_limit (int): Items per page (1-120, default 120)
+
+    Yields:
+        Item: Search result items
+    """
+    # Clamp page limit between 1 and 120
+    limit = max(1, min(120, page_limit))
+
+    # Build search condition with optional filtering
+    search_condition = {
+        "keyword": keywords,
+        "sort": sort,
+        "order": order,
+        "status": [status],
+        "excludeKeyword": exclude_keywords,
+    }
+
+    # Add category filtering if provided
+    if category_ids is not None and len(category_ids) > 0:
+        search_condition["categoryIds"] = category_ids
+
+    # Add brand filtering if provided
+    if brand_ids is not None and len(brand_ids) > 0:
+        search_condition["brandIds"] = brand_ids
 
     data = {
         # this seems to be random, but we'll add a prefix for mercari to track if they wanted to
-        "userId": "MERCARI_BOT_{}".format(uuid.uuid4()), 
+        "userId": "MERCARI_BOT_{}".format(uuid.uuid4()),
         "pageSize": limit,
         "pageToken": pageToPageToken(0),
         # same thing as userId, courtesy of a prefix for mercari
         "searchSessionId": "MERCARI_BOT_{}".format(uuid.uuid4()),
         # this is hardcoded in their frontend currently, so leaving it
         "indexRouting": "INDEX_ROUTING_UNSPECIFIED",
-        "searchCondition": {
-            "keyword": keywords,
-            "sort": sort,
-            "order": order,
-            "status": [status],
-            "excludeKeyword": exclude_keywords,
-        },
+        "searchCondition": search_condition,
         "withAuction": True,
         # I'm not certain what these are, but I believe it's what mercari queries against
         # this is the default in their site, so leaving it as these 2
@@ -163,7 +330,7 @@ def search(keywords, sort=MercariSort.SORT_CREATED_TIME, order=MercariOrder.ORDE
         data['pageToken'] = next_page_token
 
 
-def getItemInfo(itemID, country_code="US"):
+def getItemInfo(itemID, country_code="JP"):
     data = {
         "id": itemID,
         "country_code": country_code,
