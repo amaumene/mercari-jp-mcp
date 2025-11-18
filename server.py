@@ -20,25 +20,57 @@ logging.basicConfig(
 mcp = FastMCP(name="MercariSearchComplete")
 
 @mcp.tool(name="search_mercari_jp",
-          description="""Search Mercari Japan with intelligent category filtering to reduce noise.
-Automatically detects relevant categories and returns comprehensive item data for ALL matching items including:
-- Price, condition, description
-- Seller ratings and sales history
-- Shipping details and timeline
-- Photos and engagement metrics
+          description="""Search Mercari Japan marketplace using intelligent two-phase category filtering.
 
-Args:
-    keyword (str): Search term in Japanese or English (e.g., 'iPhone15 Pro 256GB')
-    exclude_keywords (str): Space-separated keywords to exclude (e.g., 'ジャンク ケース')
-    min_price (int, optional): Minimum price in JPY
-    max_price (int, optional): Maximum price in JPY
+HOW IT WORKS:
+1. Category Discovery Phase: Samples ~30 items to identify the 3 most relevant product categories
+2. Focused Search Phase: Re-searches with category filters and returns ALL matching items sorted by price (cheapest first)
 
-Note: Returns ALL matching items without limit for comprehensive analysis.""")
+WHAT IT RETURNS (13+ fields per item):
+- Basic: name, price (JPY), url, description, condition, category
+- Seller: name, rating_score (0-5), good_ratings, normal_ratings, bad_ratings, total_sales
+- Shipping: payer, method, from_area, duration (e.g., "1-2 days")
+- Engagement: num_likes, num_comments
+- Media: photos (array of up to 3 image URLs)
+- Timestamps: created_timestamp, updated_timestamp (Unix timestamps)
+
+PERFORMANCE:
+⚠️ SLOW operation: ~0.15 second delay per item (rate limiting to avoid API blocks)
+- 50 items ≈ 7-10 seconds
+- 200 items ≈ 30-40 seconds
+→ Use specific keywords to reduce result set size
+
+KEYWORD BEST PRACTICES:
+✓ Japanese keywords often yield better results than English
+✓ Be specific: Use model numbers, sizes, colors (e.g., "iPhone15 Pro 256GB ブルー")
+✓ Exclude unwanted: Use exclude_keywords for "ジャンク" (junk), "ケースのみ" (case only), "破損" (damaged)
+
+WHEN TO USE:
+✓ Finding market prices for specific items
+✓ Comparing seller ratings and shipping options
+✓ Getting comprehensive data for analysis
+✗ NOT for broad browsing (too slow)
+✗ NOT for real-time monitoring (delays built-in)
+
+LIMITATIONS:
+• Price filtering: Must be done CLIENT-SIDE after receiving results
+• Category filtering: Based on sampling; may miss rare categories
+• Error handling: Returns partial results if some items fail (logged but not reported)
+• Fallback: If category discovery fails, searches without category filter (may return more items)
+
+PARAMETERS:
+• keyword: Main search term in Japanese or English (e.g., "MacBook Pro 2023", "ポケモンカード")
+• exclude_keywords: Space-separated (NOT comma) keywords to exclude (e.g., "ジャンク 破損 汚れ")
+
+RETURNS: List of dictionaries, sorted by price ascending. Empty list [] if no results or error.
+
+EXAMPLES:
+- Search: "iPhone 14 Pro 256GB", Exclude: "ジャンク ケースのみ"
+- Search: "Nintendo Switch 有機EL", Exclude: "ジャンク 箱のみ"
+- Search: "ロレックス サブマリーナ", Exclude: "偽物 レプリカ" """)
 def search_mercari_items_filtered(
-    keyword: str = Field(..., description="The main keyword to search for (e.g., 'iPhone15 Pro 256GB')."),
-    exclude_keywords: str = Field("", description="Space-separated keywords to exclude (e.g., 'ジャンク max')."),
-    min_price: Optional[int] = Field(None, description="Minimum price in JPY.", ge=0),
-    max_price: Optional[int] = Field(None, description="Maximum price in JPY.", ge=0)
+    keyword: str = Field(..., description="Main search term in Japanese or English. Be specific for best results. Examples: 'iPhone15 Pro 256GB', 'MacBook Pro 2023', 'ポケモンカード', 'ロレックス サブマリーナ'"),
+    exclude_keywords: str = Field("", description="Space-separated (NOT comma) keywords to exclude from results. Common exclusions: 'ジャンク' (junk), 'ケースのみ' (case only), '破損' (damaged), '汚れ' (dirty), '箱のみ' (box only)")
 ) -> List[Dict[str, Any]]:
     """
     Performs a two-phase smart search on Mercari Japan:
@@ -46,19 +78,15 @@ def search_mercari_items_filtered(
     2. Focused Search: Re-searches with category filters to reduce noise
 
     Returns comprehensive item data including seller ratings, shipping details,
-    and engagement metrics.
+    and engagement metrics for ALL items matching the keyword and category filters.
 
     Returns:
-        A list of dictionaries for items matching all criteria.
+        A list of dictionaries for all matching items.
         Returns an empty list if no items are found or an error occurs.
     """
     # Input validation
     if not keyword or not keyword.strip():
         logger.error("Keyword parameter is empty or contains only whitespace")
-        return []
-
-    if min_price is not None and max_price is not None and min_price > max_price:
-        logger.error(f"Invalid price range: min_price ({min_price}) is greater than max_price ({max_price})")
         return []
 
     items_found: List[Dict[str, Any]] = []
@@ -102,12 +130,6 @@ def search_mercari_items_filtered(
 
                 # Rate limiting: Add small delay to avoid triggering anti-bot detection
                 time.sleep(0.15)
-
-                # Apply price filters manually since old library doesn't support them in search
-                if min_price is not None and full_item.price < min_price:
-                    continue
-                if max_price is not None and full_item.price > max_price:
-                    continue
 
                 if full_item.item_category and full_item.item_category.id:
                     category_counter[full_item.item_category.id] += 1
@@ -187,12 +209,6 @@ def search_mercari_items_filtered(
 
                 # Rate limiting: Add small delay to avoid triggering anti-bot detection
                 time.sleep(0.15)
-
-                # Apply price filters manually
-                if min_price is not None and full_item.price < min_price:
-                    continue
-                if max_price is not None and full_item.price > max_price:
-                    continue
 
                 # Build comprehensive result dictionary
                 item_data = {
